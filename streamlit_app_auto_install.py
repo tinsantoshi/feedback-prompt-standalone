@@ -4,8 +4,8 @@ import json
 from datetime import datetime
 import re
 import random
-import requests
-from typing import Dict, List, Any, Optional
+import sys
+import subprocess
 
 # Set page configuration
 st.set_page_config(
@@ -21,6 +21,31 @@ if 'prompt_input' not in st.session_state:
 # Initialize session state for history
 if 'history' not in st.session_state:
     st.session_state.history = []
+
+# Initialize session state for package installation
+if 'packages_installed' not in st.session_state:
+    st.session_state.packages_installed = False
+
+# Function to install required packages
+def install_packages():
+    try:
+        # Check if we're running in Streamlit Cloud
+        is_streamlit_cloud = os.environ.get('IS_STREAMLIT_CLOUD') == 'true'
+        
+        # Install packages
+        st.info("Installing required packages... This may take a moment.")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "openai>=0.27.0"])
+        
+        # Mark as installed
+        st.session_state.packages_installed = True
+        st.success("✅ Packages installed successfully! Please refresh the page.")
+        
+        # Force a refresh if we're not in Streamlit Cloud
+        if not is_streamlit_cloud:
+            st.experimental_rerun()
+    except Exception as e:
+        st.error(f"Failed to install packages: {str(e)}")
+        st.error("Please try installing the packages manually: pip install openai>=0.27.0")
 
 # Load custom CSS
 def load_css():
@@ -40,6 +65,32 @@ st.markdown("""
 This tool helps you improve your prompts for LLMs by providing real-time feedback.
 Type your prompt in the text area below and receive instant feedback on its quality.
 """)
+
+# Try to import OpenAI with version check
+try:
+    import openai
+    import pkg_resources
+    openai_version = pkg_resources.get_distribution("openai").version
+    is_openai_v1 = int(openai_version.split('.')[0]) >= 1
+    has_openai = True
+    st.sidebar.success(f"✅ OpenAI {openai_version} loaded successfully")
+    if is_openai_v1:
+        st.sidebar.info("Using OpenAI API v1.0.0+")
+    else:
+        st.sidebar.info("Using OpenAI API v0.x")
+except ImportError:
+    has_openai = False
+    is_openai_v1 = False
+    st.sidebar.error("❌ OpenAI module not available.")
+    
+    # Show install button if packages aren't installed yet
+    if not st.session_state.packages_installed:
+        if st.sidebar.button("Install OpenAI Package"):
+            install_packages()
+except Exception as e:
+    has_openai = False
+    is_openai_v1 = False
+    st.sidebar.error(f"❌ Error loading OpenAI: {str(e)}")
 
 # Sidebar for configuration
 st.sidebar.title("Configuration")
@@ -68,11 +119,12 @@ examples = st.sidebar.checkbox("Examples", value=True, help="Does it include exa
 format = st.sidebar.checkbox("Format", value=True, help="Does it specify desired output format?")
 
 # LLM selection
-use_llm = st.sidebar.checkbox("Use LLM for advanced feedback", value=bool(api_key), 
-                             help="Uses an LLM to provide more detailed feedback (requires API key)")
+use_llm = st.sidebar.checkbox("Use LLM for advanced feedback", value=has_openai, 
+                             help="Uses an LLM to provide more detailed feedback (requires API key)",
+                             disabled=not has_openai)
 
-if use_llm and not api_key:
-    st.sidebar.warning("LLM-based evaluation requires an OpenAI API key.")
+if not has_openai and use_llm:
+    st.sidebar.warning("LLM-based evaluation requires OpenAI package. Using heuristic evaluation only.")
     use_llm = False
 
 # LLM model selection (only show if use_llm is checked)
@@ -120,7 +172,7 @@ with col1:
     process_button = st.button("Get Feedback")
     
     # Add a button to execute the prompt with an LLM (if API key is available)
-    if api_key and prompt_input.strip():
+    if api_key and prompt_input.strip() and has_openai:
         st.markdown("---")
         st.subheader("Execute Prompt")
         execute_col1, execute_col2 = st.columns([1, 1])
@@ -364,62 +416,20 @@ class PromptEvaluator:
         
         return improved_prompt
 
-# Direct OpenAI API implementation (no dependencies)
-class OpenAIDirectAPI:
-    """Direct implementation of OpenAI API calls without dependencies"""
-    
-    def __init__(self, api_key):
-        self.api_key = api_key
-        self.api_url = "https://api.openai.com/v1/chat/completions"
-    
-    def chat_completion(self, messages, model="gpt-3.5-turbo", temperature=0.7, max_tokens=800):
-        """Make a direct API call to OpenAI's chat completion endpoint"""
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}"
-        }
-        
-        data = {
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens
-        }
-        
-        try:
-            response = requests.post(self.api_url, headers=headers, json=data)
-            response.raise_for_status()  # Raise an exception for HTTP errors
-            
-            result = response.json()
-            
-            if "choices" in result and len(result["choices"]) > 0:
-                return result["choices"][0]["message"]["content"]
-            else:
-                return "Error: No response content"
-        
-        except requests.exceptions.RequestException as e:
-            if hasattr(e, 'response') and e.response is not None:
-                try:
-                    error_data = e.response.json()
-                    error_message = error_data.get('error', {}).get('message', str(e))
-                    return f"API Error: {error_message}"
-                except:
-                    return f"API Error: {str(e)}"
-            return f"Request Error: {str(e)}"
-        except Exception as e:
-            return f"Error: {str(e)}"
-
-# Function to get feedback using direct OpenAI API
+# Function to get feedback using OpenAI API directly - compatible with both v0.x and v1.x
 def get_llm_feedback(prompt, criteria, api_key, model="gpt-3.5-turbo"):
-    """Get feedback using direct OpenAI API calls"""
-    if not api_key:
+    """Get feedback using OpenAI API directly"""
+    if not has_openai:
         return {
             "score": 0,
             "strengths": [],
-            "weaknesses": ["API key not provided"],
-            "suggestions": ["Enter an OpenAI API key to use LLM-based feedback"],
+            "weaknesses": ["OpenAI package not available"],
+            "suggestions": ["Install the OpenAI package to use LLM-based feedback"],
             "improvedPrompt": ""
         }
+    
+    import openai
+    import json
     
     # Create a prompt for the LLM
     system_prompt = """
@@ -454,27 +464,37 @@ def get_llm_feedback(prompt, criteria, api_key, model="gpt-3.5-turbo"):
     criteria_message += ", ".join(criteria_list)
     
     try:
-        # Create API client
-        api_client = OpenAIDirectAPI(api_key)
+        # Check OpenAI version and use appropriate API
+        import pkg_resources
+        openai_version = pkg_resources.get_distribution("openai").version
+        is_openai_v1 = int(openai_version.split('.')[0]) >= 1
         
-        # Make API call
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"{criteria_message}\n\nPrompt to evaluate: {prompt}"}
-        ]
-        
-        content = api_client.chat_completion(messages, model=model)
-        
-        # Check if there was an error
-        if content.startswith("Error:") or content.startswith("API Error:") or content.startswith("Request Error:"):
-            st.error(content)
-            return {
-                "score": 0,
-                "strengths": [],
-                "weaknesses": ["Failed to get LLM feedback"],
-                "suggestions": ["Try again or use heuristic evaluation"],
-                "improvedPrompt": ""
-            }
+        if is_openai_v1:
+            # OpenAI v1.x API
+            client = openai.OpenAI(api_key=api_key)
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"{criteria_message}\n\nPrompt to evaluate: {prompt}"}
+                ],
+                temperature=0.7,
+                max_tokens=800
+            )
+            content = response.choices[0].message.content
+        else:
+            # OpenAI v0.x API
+            openai.api_key = api_key
+            response = openai.ChatCompletion.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"{criteria_message}\n\nPrompt to evaluate: {prompt}"}
+                ],
+                temperature=0.7,
+                max_tokens=800
+            )
+            content = response.choices[0].message.content
         
         # Find JSON in the response
         json_match = re.search(r'```json\s*(.*?)\s*```|(\{.*\})', content, re.DOTALL)
@@ -534,22 +554,46 @@ def get_llm_feedback(prompt, criteria, api_key, model="gpt-3.5-turbo"):
             "improvedPrompt": ""
         }
 
-# Function to execute a prompt with direct OpenAI API
+# Function to execute a prompt with OpenAI - compatible with both v0.x and v1.x
 def execute_prompt_with_llm(prompt, api_key, model="gpt-3.5-turbo"):
-    """Execute a prompt using direct OpenAI API calls"""
-    if not api_key:
-        return "Error: API key not provided"
+    """Execute a prompt using OpenAI API"""
+    if not has_openai:
+        return "Error: OpenAI package not available. Please install it first."
+    
+    import openai
     
     try:
-        # Create API client
-        api_client = OpenAIDirectAPI(api_key)
+        # Check OpenAI version and use appropriate API
+        import pkg_resources
+        openai_version = pkg_resources.get_distribution("openai").version
+        is_openai_v1 = int(openai_version.split('.')[0]) >= 1
         
-        # Make API call
-        messages = [
-            {"role": "user", "content": prompt}
-        ]
+        if is_openai_v1:
+            # OpenAI v1.x API
+            client = openai.OpenAI(api_key=api_key)
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.7,
+                max_tokens=1500
+            )
+            content = response.choices[0].message.content
+        else:
+            # OpenAI v0.x API
+            openai.api_key = api_key
+            response = openai.ChatCompletion.create(
+                model=model,
+                messages=[
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.7,
+                max_tokens=1500
+            )
+            content = response.choices[0].message.content
         
-        return api_client.chat_completion(messages, model=model, max_tokens=1500)
+        return content
     except Exception as e:
         return f"Error executing prompt: {str(e)}"
 
@@ -567,7 +611,7 @@ def get_feedback(prompt, criteria_json, use_llm_param, llm_model_param, api_key_
     heuristic_feedback = evaluator.evaluate_prompt(prompt)
     
     # If LLM feedback is requested and possible
-    if use_llm_param and api_key_param:
+    if use_llm_param and api_key_param and has_openai:
         # Try direct OpenAI API call
         try:
             return get_llm_feedback(prompt, criteria_dict, api_key_param, llm_model_param)
@@ -728,15 +772,21 @@ with st.expander("Debug Information", expanded=False):
     st.write("Session State Keys:", list(st.session_state.keys()))
     st.write("Current Prompt Input:", st.session_state.prompt_input)
     st.write("History Count:", len(st.session_state.history))
+    st.write("OpenAI Available:", has_openai)
+    if has_openai:
+        st.write("OpenAI Version:", openai_version)
+        st.write("Using OpenAI v1 API:", is_openai_v1)
     st.write("API Key Set:", bool(api_key))
+    st.write("Packages Installed:", st.session_state.packages_installed)
     
-    # Show requests version
-    st.write("Requests Version:", requests.__version__)
+    # Show system information
+    st.write("Python Version:", sys.version)
+    st.write("Executable Path:", sys.executable)
     
-    # Test API connectivity
-    if st.button("Test API Connectivity"):
+    # Show installed packages
+    if st.button("Show Installed Packages"):
         try:
-            response = requests.get("https://api.openai.com", timeout=5)
-            st.write(f"API Connectivity: {response.status_code}")
+            installed_packages = subprocess.check_output([sys.executable, "-m", "pip", "freeze"]).decode()
+            st.code(installed_packages)
         except Exception as e:
-            st.write(f"API Connectivity Error: {str(e)}")
+            st.error(f"Failed to get installed packages: {str(e)}")

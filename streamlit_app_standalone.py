@@ -4,8 +4,6 @@ import json
 from datetime import datetime
 import re
 import random
-import requests
-from typing import Dict, List, Any, Optional
 
 # Set page configuration
 st.set_page_config(
@@ -18,9 +16,22 @@ st.set_page_config(
 if 'prompt_input' not in st.session_state:
     st.session_state.prompt_input = ""
 
+# Initialize session state for improved prompt
+if 'improved_prompt' not in st.session_state:
+    st.session_state.improved_prompt = ""
+
 # Initialize session state for history
 if 'history' not in st.session_state:
     st.session_state.history = []
+
+# Initialize session state for button click
+if 'use_improved_clicked' not in st.session_state:
+    st.session_state.use_improved_clicked = False
+
+# Function to update prompt input with improved prompt
+def use_improved_prompt():
+    st.session_state.prompt_input = st.session_state.improved_prompt
+    st.session_state.use_improved_clicked = True
 
 # Load custom CSS
 def load_css():
@@ -40,6 +51,77 @@ st.markdown("""
 This tool helps you improve your prompts for LLMs by providing real-time feedback.
 Type your prompt in the text area below and receive instant feedback on its quality.
 """)
+
+# Function to install required packages
+def install_package(package):
+    import subprocess
+    try:
+        st.info(f"Installing {package}... This may take a moment.")
+        subprocess.check_call(["pip", "install", package])
+        st.success(f"Successfully installed {package}!")
+        return True
+    except Exception as e:
+        st.error(f"Failed to install {package}: {str(e)}")
+        return False
+
+# Check for required packages
+has_langchain = False
+has_openai = False
+
+# Try to import OpenAI directly
+try:
+    import openai
+    has_openai = True
+    st.sidebar.success("✅ OpenAI module loaded successfully")
+except ImportError:
+    has_openai = False
+    st.sidebar.warning("⚠️ OpenAI module not available. Using heuristic evaluation only.")
+    
+    # Add an install button
+    if st.sidebar.button("Install OpenAI Package"):
+        if install_package("openai"):
+            try:
+                import openai
+                has_openai = True
+                st.sidebar.success("✅ OpenAI module loaded successfully")
+                st.rerun()
+            except ImportError:
+                st.sidebar.error("❌ Failed to import OpenAI after installation. Please restart the application.")
+
+# Try importing LangChain with compatibility for different versions
+try:
+    # Try importing from langchain_community (newer versions)
+    from langchain_community.chat_models import ChatOpenAI
+    from langchain_community.llms import OpenAI
+    has_langchain = True
+    st.sidebar.success("✅ LangChain modules loaded successfully")
+except ImportError:
+    try:
+        # Try importing from langchain (older versions)
+        from langchain.chat_models import ChatOpenAI
+        from langchain.llms import OpenAI
+        has_langchain = True
+        st.sidebar.success("✅ LangChain modules loaded successfully")
+    except ImportError:
+        has_langchain = False
+        st.sidebar.warning("⚠️ LangChain modules not available. Using OpenAI directly if available.")
+        
+        # Add an install button for LangChain
+        if st.sidebar.button("Install LangChain Package"):
+            if install_package("langchain") and install_package("langchain-community"):
+                try:
+                    # Try importing again after installation
+                    try:
+                        from langchain_community.chat_models import ChatOpenAI
+                        from langchain_community.llms import OpenAI
+                    except ImportError:
+                        from langchain.chat_models import ChatOpenAI
+                        from langchain.llms import OpenAI
+                    has_langchain = True
+                    st.sidebar.success("✅ LangChain modules loaded successfully")
+                    st.rerun()
+                except ImportError:
+                    st.sidebar.error("❌ Failed to import LangChain after installation. Please restart the application.")
 
 # Sidebar for configuration
 st.sidebar.title("Configuration")
@@ -68,11 +150,13 @@ examples = st.sidebar.checkbox("Examples", value=True, help="Does it include exa
 format = st.sidebar.checkbox("Format", value=True, help="Does it specify desired output format?")
 
 # LLM selection
-use_llm = st.sidebar.checkbox("Use LLM for advanced feedback", value=bool(api_key), 
-                             help="Uses an LLM to provide more detailed feedback (requires API key)")
+can_use_llm = (has_langchain or has_openai)
+use_llm = st.sidebar.checkbox("Use LLM for advanced feedback", value=can_use_llm, 
+                             help="Uses an LLM to provide more detailed feedback (requires API key)",
+                             disabled=not can_use_llm)
 
-if use_llm and not api_key:
-    st.sidebar.warning("LLM-based evaluation requires an OpenAI API key.")
+if not can_use_llm and use_llm:
+    st.sidebar.warning("LLM-based evaluation requires OpenAI package. Using heuristic evaluation only.")
     use_llm = False
 
 # LLM model selection (only show if use_llm is checked)
@@ -94,15 +178,16 @@ criteria = {
     "format": format
 }
 
-# Function to update prompt input in session state
-def update_prompt_input(new_value):
-    st.session_state.prompt_input = new_value
-
 # Main content - two columns layout
 col1, col2 = st.columns([3, 2])
 
 with col1:
     st.subheader("Your Prompt")
+    
+    # Check if we need to update from improved prompt
+    if st.session_state.use_improved_clicked:
+        st.session_state.use_improved_clicked = False  # Reset the flag
+    
     # Use the session state value as the default
     prompt_input = st.text_area(
         "Enter your prompt:",
@@ -114,13 +199,13 @@ with col1:
     
     # Update session state when text area changes
     if prompt_input != st.session_state.prompt_input:
-        update_prompt_input(prompt_input)
-
+        st.session_state.prompt_input = prompt_input
+    
     # Process button
     process_button = st.button("Get Feedback")
     
     # Add a button to execute the prompt with an LLM (if API key is available)
-    if api_key and prompt_input.strip():
+    if api_key and prompt_input.strip() and (has_openai or has_langchain):
         st.markdown("---")
         st.subheader("Execute Prompt")
         execute_col1, execute_col2 = st.columns([1, 1])
@@ -364,62 +449,11 @@ class PromptEvaluator:
         
         return improved_prompt
 
-# Direct OpenAI API implementation (no dependencies)
-class OpenAIDirectAPI:
-    """Direct implementation of OpenAI API calls without dependencies"""
-    
-    def __init__(self, api_key):
-        self.api_key = api_key
-        self.api_url = "https://api.openai.com/v1/chat/completions"
-    
-    def chat_completion(self, messages, model="gpt-3.5-turbo", temperature=0.7, max_tokens=800):
-        """Make a direct API call to OpenAI's chat completion endpoint"""
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}"
-        }
-        
-        data = {
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens
-        }
-        
-        try:
-            response = requests.post(self.api_url, headers=headers, json=data)
-            response.raise_for_status()  # Raise an exception for HTTP errors
-            
-            result = response.json()
-            
-            if "choices" in result and len(result["choices"]) > 0:
-                return result["choices"][0]["message"]["content"]
-            else:
-                return "Error: No response content"
-        
-        except requests.exceptions.RequestException as e:
-            if hasattr(e, 'response') and e.response is not None:
-                try:
-                    error_data = e.response.json()
-                    error_message = error_data.get('error', {}).get('message', str(e))
-                    return f"API Error: {error_message}"
-                except:
-                    return f"API Error: {str(e)}"
-            return f"Request Error: {str(e)}"
-        except Exception as e:
-            return f"Error: {str(e)}"
-
-# Function to get feedback using direct OpenAI API
-def get_llm_feedback(prompt, criteria, api_key, model="gpt-3.5-turbo"):
-    """Get feedback using direct OpenAI API calls"""
-    if not api_key:
-        return {
-            "score": 0,
-            "strengths": [],
-            "weaknesses": ["API key not provided"],
-            "suggestions": ["Enter an OpenAI API key to use LLM-based feedback"],
-            "improvedPrompt": ""
-        }
+# Function to get feedback using OpenAI API directly
+def get_llm_feedback_direct(prompt, criteria, api_key, model="gpt-3.5-turbo"):
+    """Get feedback using OpenAI API directly with requests (no OpenAI package required)"""
+    import requests
+    import json
     
     # Create a prompt for the LLM
     system_prompt = """
@@ -454,20 +488,85 @@ def get_llm_feedback(prompt, criteria, api_key, model="gpt-3.5-turbo"):
     criteria_message += ", ".join(criteria_list)
     
     try:
-        # Create API client
-        api_client = OpenAIDirectAPI(api_key)
+        # API endpoint
+        url = "https://api.openai.com/v1/chat/completions"
         
-        # Make API call
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"{criteria_message}\n\nPrompt to evaluate: {prompt}"}
-        ]
+        # Headers
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}"
+        }
         
-        content = api_client.chat_completion(messages, model=model)
+        # Data
+        data = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"{criteria_message}\n\nPrompt to evaluate: {prompt}"}
+            ],
+            "temperature": 0.7,
+            "max_tokens": 800
+        }
         
-        # Check if there was an error
-        if content.startswith("Error:") or content.startswith("API Error:") or content.startswith("Request Error:"):
-            st.error(content)
+        # Make the request
+        response = requests.post(url, headers=headers, json=data)
+        
+        # Check if the request was successful
+        if response.status_code == 200:
+            # Parse the response
+            response_json = response.json()
+            content = response_json["choices"][0]["message"]["content"]
+            
+            # Find JSON in the response
+            json_match = re.search(r'```json\s*(.*?)\s*```|(\{.*\})', content, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(1) or json_match.group(2)
+                try:
+                    result = json.loads(json_str)
+                    return result
+                except json.JSONDecodeError:
+                    pass
+            
+            # If we couldn't parse JSON, try to extract structured data
+            result = {
+                "score": 50,  # Default score
+                "strengths": [],
+                "weaknesses": [],
+                "suggestions": [],
+                "improvedPrompt": ""
+            }
+            
+            # Try to find score
+            score_match = re.search(r'score[:\s]+(\d+)', content, re.IGNORECASE)
+            if score_match:
+                result["score"] = int(score_match.group(1))
+            
+            # Try to find strengths
+            strengths_section = re.search(r'strengths?:(.*?)(?:weaknesses?:|suggestions?:|improved)', content, re.IGNORECASE | re.DOTALL)
+            if strengths_section:
+                strengths = re.findall(r'[-*]\s*(.*?)(?:\n|$)', strengths_section.group(1))
+                result["strengths"] = [s.strip() for s in strengths if s.strip()]
+            
+            # Try to find weaknesses
+            weaknesses_section = re.search(r'weaknesses?:(.*?)(?:strengths?:|suggestions?:|improved)', content, re.IGNORECASE | re.DOTALL)
+            if weaknesses_section:
+                weaknesses = re.findall(r'[-*]\s*(.*?)(?:\n|$)', weaknesses_section.group(1))
+                result["weaknesses"] = [w.strip() for w in weaknesses if w.strip()]
+            
+            # Try to find suggestions
+            suggestions_section = re.search(r'suggestions?:(.*?)(?:strengths?:|weaknesses?:|improved)', content, re.IGNORECASE | re.DOTALL)
+            if suggestions_section:
+                suggestions = re.findall(r'[-*]\s*(.*?)(?:\n|$)', suggestions_section.group(1))
+                result["suggestions"] = [s.strip() for s in suggestions if s.strip()]
+            
+            # Try to find improved prompt
+            improved_section = re.search(r'improved.*?prompt:?(.*?)(?:$|strengths?:|weaknesses?:|suggestions?:)', content, re.IGNORECASE | re.DOTALL)
+            if improved_section:
+                result["improvedPrompt"] = improved_section.group(1).strip()
+            
+            return result
+        else:
+            st.error(f"Error calling OpenAI API: {response.status_code} - {response.text}")
             return {
                 "score": 0,
                 "strengths": [],
@@ -475,55 +574,6 @@ def get_llm_feedback(prompt, criteria, api_key, model="gpt-3.5-turbo"):
                 "suggestions": ["Try again or use heuristic evaluation"],
                 "improvedPrompt": ""
             }
-        
-        # Find JSON in the response
-        json_match = re.search(r'```json\s*(.*?)\s*```|(\{.*\})', content, re.DOTALL)
-        if json_match:
-            json_str = json_match.group(1) or json_match.group(2)
-            try:
-                result = json.loads(json_str)
-                return result
-            except json.JSONDecodeError:
-                pass
-        
-        # If we couldn't parse JSON, try to extract structured data
-        result = {
-            "score": 50,  # Default score
-            "strengths": [],
-            "weaknesses": [],
-            "suggestions": [],
-            "improvedPrompt": ""
-        }
-        
-        # Try to find score
-        score_match = re.search(r'score[:\s]+(\d+)', content, re.IGNORECASE)
-        if score_match:
-            result["score"] = int(score_match.group(1))
-        
-        # Try to find strengths
-        strengths_section = re.search(r'strengths?:(.*?)(?:weaknesses?:|suggestions?:|improved)', content, re.IGNORECASE | re.DOTALL)
-        if strengths_section:
-            strengths = re.findall(r'[-*]\s*(.*?)(?:\n|$)', strengths_section.group(1))
-            result["strengths"] = [s.strip() for s in strengths if s.strip()]
-        
-        # Try to find weaknesses
-        weaknesses_section = re.search(r'weaknesses?:(.*?)(?:strengths?:|suggestions?:|improved)', content, re.IGNORECASE | re.DOTALL)
-        if weaknesses_section:
-            weaknesses = re.findall(r'[-*]\s*(.*?)(?:\n|$)', weaknesses_section.group(1))
-            result["weaknesses"] = [w.strip() for w in weaknesses if w.strip()]
-        
-        # Try to find suggestions
-        suggestions_section = re.search(r'suggestions?:(.*?)(?:strengths?:|weaknesses?:|improved)', content, re.IGNORECASE | re.DOTALL)
-        if suggestions_section:
-            suggestions = re.findall(r'[-*]\s*(.*?)(?:\n|$)', suggestions_section.group(1))
-            result["suggestions"] = [s.strip() for s in suggestions if s.strip()]
-        
-        # Try to find improved prompt
-        improved_section = re.search(r'improved.*?prompt:?(.*?)(?:$|strengths?:|weaknesses?:|suggestions?:)', content, re.IGNORECASE | re.DOTALL)
-        if improved_section:
-            result["improvedPrompt"] = improved_section.group(1).strip()
-        
-        return result
     except Exception as e:
         st.error(f"Error calling OpenAI API: {str(e)}")
         return {
@@ -534,22 +584,220 @@ def get_llm_feedback(prompt, criteria, api_key, model="gpt-3.5-turbo"):
             "improvedPrompt": ""
         }
 
-# Function to execute a prompt with direct OpenAI API
+# Function to get feedback using OpenAI API directly
+def get_llm_feedback(prompt, criteria, api_key, model="gpt-3.5-turbo"):
+    """Get feedback using OpenAI API directly"""
+    # Try using the OpenAI package if available
+    if has_openai:
+        try:
+            import openai
+            import json
+            
+            openai.api_key = api_key
+            
+            # Create a prompt for the LLM
+            system_prompt = """
+            You are an expert prompt engineer. Evaluate the quality of the given prompt based on the specified criteria.
+            Provide a score from 0-100, list strengths, weaknesses, and specific suggestions for improvement.
+            Also provide an improved version of the prompt.
+            
+            Return your response in the following JSON format:
+            {
+                "score": <score>,
+                "strengths": ["strength1", "strength2", ...],
+                "weaknesses": ["weakness1", "weakness2", ...],
+                "suggestions": ["suggestion1", "suggestion2", ...],
+                "improvedPrompt": "<improved version of the prompt>"
+            }
+            """
+            
+            # Create a message about which criteria to evaluate
+            criteria_message = "Evaluate the prompt based on these criteria: "
+            criteria_list = []
+            if criteria.get("clarity"):
+                criteria_list.append("clarity (is it clear and specific)")
+            if criteria.get("context"):
+                criteria_list.append("context (does it provide necessary context)")
+            if criteria.get("constraints"):
+                criteria_list.append("constraints (does it specify limitations or requirements)")
+            if criteria.get("examples"):
+                criteria_list.append("examples (does it include examples if needed)")
+            if criteria.get("format"):
+                criteria_list.append("format (does it specify desired output format)")
+            
+            criteria_message += ", ".join(criteria_list)
+            
+            try:
+                # Try with newer OpenAI API (v1.0+)
+                try:
+                    client = openai.OpenAI(api_key=api_key)
+                    response = client.chat.completions.create(
+                        model=model,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": f"{criteria_message}\n\nPrompt to evaluate: {prompt}"}
+                        ],
+                        temperature=0.7,
+                        max_tokens=800
+                    )
+                    content = response.choices[0].message.content
+                except (AttributeError, TypeError):
+                    # Fall back to older OpenAI API (v0.x)
+                    response = openai.ChatCompletion.create(
+                        model=model,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": f"{criteria_message}\n\nPrompt to evaluate: {prompt}"}
+                        ],
+                        temperature=0.7,
+                        max_tokens=800
+                    )
+                    content = response.choices[0].message.content
+                
+                # Find JSON in the response
+                json_match = re.search(r'```json\s*(.*?)\s*```|(\{.*\})', content, re.DOTALL)
+                if json_match:
+                    json_str = json_match.group(1) or json_match.group(2)
+                    try:
+                        result = json.loads(json_str)
+                        return result
+                    except json.JSONDecodeError:
+                        pass
+                
+                # If we couldn't parse JSON, try to extract structured data
+                result = {
+                    "score": 50,  # Default score
+                    "strengths": [],
+                    "weaknesses": [],
+                    "suggestions": [],
+                    "improvedPrompt": ""
+                }
+                
+                # Try to find score
+                score_match = re.search(r'score[:\s]+(\d+)', content, re.IGNORECASE)
+                if score_match:
+                    result["score"] = int(score_match.group(1))
+                
+                # Try to find strengths
+                strengths_section = re.search(r'strengths?:(.*?)(?:weaknesses?:|suggestions?:|improved)', content, re.IGNORECASE | re.DOTALL)
+                if strengths_section:
+                    strengths = re.findall(r'[-*]\s*(.*?)(?:\n|$)', strengths_section.group(1))
+                    result["strengths"] = [s.strip() for s in strengths if s.strip()]
+                
+                # Try to find weaknesses
+                weaknesses_section = re.search(r'weaknesses?:(.*?)(?:strengths?:|suggestions?:|improved)', content, re.IGNORECASE | re.DOTALL)
+                if weaknesses_section:
+                    weaknesses = re.findall(r'[-*]\s*(.*?)(?:\n|$)', weaknesses_section.group(1))
+                    result["weaknesses"] = [w.strip() for w in weaknesses if w.strip()]
+                
+                # Try to find suggestions
+                suggestions_section = re.search(r'suggestions?:(.*?)(?:strengths?:|weaknesses?:|improved)', content, re.IGNORECASE | re.DOTALL)
+                if suggestions_section:
+                    suggestions = re.findall(r'[-*]\s*(.*?)(?:\n|$)', suggestions_section.group(1))
+                    result["suggestions"] = [s.strip() for s in suggestions if s.strip()]
+                
+                # Try to find improved prompt
+                improved_section = re.search(r'improved.*?prompt:?(.*?)(?:$|strengths?:|weaknesses?:|suggestions?:)', content, re.IGNORECASE | re.DOTALL)
+                if improved_section:
+                    result["improvedPrompt"] = improved_section.group(1).strip()
+                
+                return result
+            except Exception as e:
+                st.error(f"Error using OpenAI package: {str(e)}")
+                # Fall back to direct API call
+                return get_llm_feedback_direct(prompt, criteria, api_key, model)
+        except Exception as e:
+            st.error(f"Error with OpenAI package: {str(e)}")
+            # Fall back to direct API call
+            return get_llm_feedback_direct(prompt, criteria, api_key, model)
+    else:
+        # Use direct API call if OpenAI package is not available
+        return get_llm_feedback_direct(prompt, criteria, api_key, model)
+
+# Function to execute a prompt with OpenAI
 def execute_prompt_with_llm(prompt, api_key, model="gpt-3.5-turbo"):
-    """Execute a prompt using direct OpenAI API calls"""
-    if not api_key:
-        return "Error: API key not provided"
+    """Execute a prompt using OpenAI API"""
+    # Try using the OpenAI package if available
+    if has_openai:
+        try:
+            import openai
+            
+            openai.api_key = api_key
+            
+            try:
+                # Try with newer OpenAI API (v1.0+)
+                try:
+                    client = openai.OpenAI(api_key=api_key)
+                    response = client.chat.completions.create(
+                        model=model,
+                        messages=[
+                            {"role": "user", "content": prompt}
+                        ],
+                        temperature=0.7,
+                        max_tokens=1500
+                    )
+                    content = response.choices[0].message.content
+                except (AttributeError, TypeError):
+                    # Fall back to older OpenAI API (v0.x)
+                    response = openai.ChatCompletion.create(
+                        model=model,
+                        messages=[
+                            {"role": "user", "content": prompt}
+                        ],
+                        temperature=0.7,
+                        max_tokens=1500
+                    )
+                    content = response.choices[0].message.content
+                
+                return content
+            except Exception as e:
+                st.error(f"Error using OpenAI package: {str(e)}")
+                # Fall back to direct API call
+                return execute_prompt_direct(prompt, api_key, model)
+        except Exception as e:
+            st.error(f"Error with OpenAI package: {str(e)}")
+            # Fall back to direct API call
+            return execute_prompt_direct(prompt, api_key, model)
+    else:
+        # Use direct API call if OpenAI package is not available
+        return execute_prompt_direct(prompt, api_key, model)
+
+# Function to execute a prompt with OpenAI API directly
+def execute_prompt_direct(prompt, api_key, model="gpt-3.5-turbo"):
+    """Execute a prompt using OpenAI API directly with requests (no OpenAI package required)"""
+    import requests
     
     try:
-        # Create API client
-        api_client = OpenAIDirectAPI(api_key)
+        # API endpoint
+        url = "https://api.openai.com/v1/chat/completions"
         
-        # Make API call
-        messages = [
-            {"role": "user", "content": prompt}
-        ]
+        # Headers
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}"
+        }
         
-        return api_client.chat_completion(messages, model=model, max_tokens=1500)
+        # Data
+        data = {
+            "model": model,
+            "messages": [
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.7,
+            "max_tokens": 1500
+        }
+        
+        # Make the request
+        response = requests.post(url, headers=headers, json=data)
+        
+        # Check if the request was successful
+        if response.status_code == 200:
+            # Parse the response
+            response_json = response.json()
+            content = response_json["choices"][0]["message"]["content"]
+            return content
+        else:
+            return f"Error executing prompt: {response.status_code} - {response.text}"
     except Exception as e:
         return f"Error executing prompt: {str(e)}"
 
@@ -567,22 +815,40 @@ def get_feedback(prompt, criteria_json, use_llm_param, llm_model_param, api_key_
     heuristic_feedback = evaluator.evaluate_prompt(prompt)
     
     # If LLM feedback is requested and possible
-    if use_llm_param and api_key_param:
+    if use_llm_param and api_key_param and has_langchain:
+        try:
+            # Set API key
+            os.environ["OPENAI_API_KEY"] = api_key_param
+            
+            # Try using LangChain if available
+            chat_model = ChatOpenAI(model=llm_model_param, temperature=0.7)
+            
+            # Use the chat model to get feedback
+            # This is a simplified version - in a real implementation, we'd use a proper chain
+            llm_feedback = get_llm_feedback(prompt, criteria_dict, api_key_param, llm_model_param)
+            
+            # Combine heuristic and LLM feedback, preferring LLM
+            return llm_feedback
+        except Exception as e:
+            st.error(f"Error using LangChain: {str(e)}")
+            return heuristic_feedback
+    elif use_llm_param and api_key_param and has_openai:
         # Try direct OpenAI API call
         try:
             return get_llm_feedback(prompt, criteria_dict, api_key_param, llm_model_param)
         except Exception as e:
             st.error(f"Error using OpenAI API: {str(e)}")
             return heuristic_feedback
+    elif use_llm_param and api_key_param:
+        # Try direct API call without OpenAI package
+        try:
+            return get_llm_feedback_direct(prompt, criteria_dict, api_key_param, llm_model_param)
+        except Exception as e:
+            st.error(f"Error using direct API call: {str(e)}")
+            return heuristic_feedback
     else:
         # Use heuristic feedback only
         return heuristic_feedback
-
-# Function to use an improved prompt
-def use_improved_prompt(improved_prompt):
-    # Update the session state
-    st.session_state.prompt_input = improved_prompt
-    # No need to call rerun here, as the button click will trigger a rerun
 
 # Process the prompt if button is clicked
 if process_button:
@@ -650,13 +916,12 @@ if process_button:
                             st.markdown("### Improved Prompt:")
                             st.text_area("", value=improved_prompt, height=150, disabled=True, key="improved_prompt_display")
                             
-                            # Use a button with a callback function
-                            if st.button("Use This Improved Prompt", key="use_improved_prompt"):
-                                # Update the session state directly
-                                update_prompt_input(improved_prompt)
-                                st.success("Prompt updated! You can now edit it or execute it.")
-                                # Use st.rerun() to refresh the page
-                                st.rerun()
+                            # Store the improved prompt in session state
+                            st.session_state.improved_prompt = improved_prompt
+                            
+                            # Use a button with callback
+                            if st.button("Use This Improved Prompt", key="use_improved_prompt", on_click=use_improved_prompt):
+                                pass  # The callback function will handle the action
                 
                 except Exception as e:
                     st.error(f"An error occurred: {str(e)}")
@@ -707,13 +972,16 @@ with st.expander("Prompt History"):
                         st.markdown("**Improved Prompt:**")
                         st.text_area("", value=item['improved_prompt'], height=100, disabled=True, key=f"imp_{i}")
                         
+                        # Define a function to update from history
+                        def use_history_prompt(history_prompt):
+                            def _use_history():
+                                st.session_state.prompt_input = history_prompt
+                                st.session_state.use_improved_clicked = True
+                            return _use_history
+                        
                         # Button to use this prompt from history
-                        if st.button("Use This Prompt", key=f"use_history_{i}"):
-                            # Update the session state directly
-                            update_prompt_input(item['improved_prompt'])
-                            st.success(f"Prompt from history loaded!")
-                            # Use st.rerun() to refresh the page
-                            st.rerun()
+                        if st.button("Use This Prompt", key=f"use_history_{i}", on_click=use_history_prompt(item['improved_prompt'])):
+                            pass  # The callback function will handle the action
                 
                 st.markdown("---")
     else:
@@ -727,16 +995,9 @@ st.markdown("Built with ❤️ using Streamlit")
 with st.expander("Debug Information", expanded=False):
     st.write("Session State Keys:", list(st.session_state.keys()))
     st.write("Current Prompt Input:", st.session_state.prompt_input)
+    st.write("Current Improved Prompt:", st.session_state.improved_prompt)
+    st.write("Use Improved Clicked:", st.session_state.use_improved_clicked)
     st.write("History Count:", len(st.session_state.history))
+    st.write("LangChain Available:", has_langchain)
+    st.write("OpenAI Available:", has_openai)
     st.write("API Key Set:", bool(api_key))
-    
-    # Show requests version
-    st.write("Requests Version:", requests.__version__)
-    
-    # Test API connectivity
-    if st.button("Test API Connectivity"):
-        try:
-            response = requests.get("https://api.openai.com", timeout=5)
-            st.write(f"API Connectivity: {response.status_code}")
-        except Exception as e:
-            st.write(f"API Connectivity Error: {str(e)}")
